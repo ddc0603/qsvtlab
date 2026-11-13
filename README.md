@@ -77,7 +77,7 @@ for Hamiltonians with many non-commuting terms. A natural next step is to measur
 ## Quick start
 
 ```bash
-git clone <this repo> && cd qsvtlab
+git clone https://github.com/ddc0603/qsvtlab.git && cd qsvtlab
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q                                   # 16 tests, about 2 s
