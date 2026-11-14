@@ -1,5 +1,7 @@
 # qsvtlab: Quantum Singular Value Transformation in PennyLane
 
+[![tests](https://github.com/ddc0603/qsvtlab/actions/workflows/tests.yml/badge.svg)](https://github.com/ddc0603/qsvtlab/actions/workflows/tests.yml)
+
 A small, tested library that runs the **quantum singular value transformation (QSVT)** end
 to end in [PennyLane](https://pennylane.ai). It finds QSVT phases at high polynomial degree,
 builds the circuits, and verifies them. Three QSVT applications are built on top:
@@ -13,7 +15,7 @@ builds the circuits, and verifies them. Three QSVT applications are built on top
   molecules (H₂ and an H₄ chain from `qml.qchem`) by QSVT eigenstate filtering, starting
   from Hartree–Fock with no prior knowledge of the energy.
 
-Everything is verified against exact linear algebra (21 tests). Every figure
+Everything is verified against exact linear algebra (21 tests, run in CI). Every figure
 below is reproduced by `python benchmarks/run_benchmarks.py` in about 10 minutes on a laptop.
 
 ## Highlights
@@ -200,7 +202,7 @@ qsvtlab/
   linear_solver.py    qsvt_solve(): end-to-end linear-system solver
   hamiltonian_sim.py  QSVT e^{-iHt}, Trotter baselines, CNOT cost models, crossover analysis
   chemistry.py        Lin–Tong eigenstate filter: QSVT spectroscopy + ground-state preparation
-tests/                21 tests checking every component against exact linear algebra
+tests/                21 tests checking every component against exact linear algebra (CI on 3.11/3.12)
 benchmarks/           reproduces all figures and results.json
 notebooks/            qsvt_tour.ipynb: a guided walkthrough
 ```
