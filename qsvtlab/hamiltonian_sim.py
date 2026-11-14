@@ -31,6 +31,11 @@ __all__ = [
     "count_gates",
     "qsvt_cnot_cost",
     "trotter_cnot_cost",
+    "qsvt_truncation_error",
+    "qsvt_min_cost",
+    "suzuki_step",
+    "trotter_min_steps",
+    "trotter_min_cost",
 ]
 
 GATE_SET = {
@@ -146,3 +151,93 @@ def qsvt_cnot_cost(H, deg_cos: int, deg_sin: int) -> int:
 
 def trotter_cnot_cost(H, steps: int, order: int) -> int:
     return count_gates(lambda: qml.TrotterProduct(H, 1.0, n=steps, order=order)).get("CNOT", 0)
+
+
+# =========================================================================== crossover analysis
+def qsvt_truncation_error(tau: float, deg_cos: int, deg_sin: int, n_grid: int = 4001) -> float:
+    r"""sup_{x∈[-1,1]} |e^{-iτx} - (cos_R(x) - i sin_R(x))|: a rigorous bound on the spectral-norm
+    error of :func:`qsvt_time_evolution`, which implements these polynomials exactly."""
+    from numpy.polynomial import chebyshev as C
+
+    x = np.cos(np.linspace(0, np.pi, n_grid))
+    approx = C.chebval(x, cos_poly(tau, deg_cos)) - 1j * C.chebval(x, sin_poly(tau, deg_sin))
+    return float(np.abs(np.exp(-1j * tau * x) - approx).max())
+
+
+def qsvt_min_cost(H, t: float, eps: float) -> tuple[int, int]:
+    """Smallest Jacobi-Anger degree meeting ``eps``, and its CNOT cost. Returns (degree, cnots)."""
+    lam = float(np.sum(np.abs(H.terms()[0])))
+    tau = lam * t
+    R = max(1, int(tau) - 5)
+    while qsvt_truncation_error(tau, R + (R % 2), R + 1 - (R % 2)) > eps:
+        R += 1
+    dc, ds = R + (R % 2), R + 1 - (R % 2)
+    return max(dc, ds), qsvt_cnot_cost(H, dc, ds)
+
+
+def _pauli_exps(H, wires):
+    """Return a function dt -> list of exp(-i c_j P_j dt) matrices, one per term."""
+    coeffs, ops = H.terms()
+    mats = [qml.matrix(o, wire_order=wires) for o in ops]
+    I = np.eye(2 ** len(wires))
+
+    def at(dt):
+        return [np.cos(c * dt) * I - 1j * np.sin(c * dt) * P for c, P in zip(np.real(coeffs), mats)]
+
+    return at
+
+
+def suzuki_step(H, dt: float, order: int, wires=None) -> np.ndarray:
+    """One Suzuki product-formula step for exp(-iH dt), order 1 or 2k (same recursion as qml.TrotterProduct)."""
+    wires = list(H.wires) if wires is None else wires
+    at = _pauli_exps(H, wires)
+
+    def S(k, h):
+        if k == 1:  # PennyLane applies the terms in reverse order for order 1
+            U = np.eye(2 ** len(wires), dtype=complex)
+            for E in at(h)[::-1]:
+                U = E @ U
+            return U
+        if k == 2:
+            half = at(h / 2)
+            U = np.eye(2 ** len(wires), dtype=complex)
+            for E in half:
+                U = E @ U
+            for E in half[::-1]:
+                U = E @ U
+            return U
+        p = 1 / (4 - 4 ** (1 / (k - 1)))
+        A = S(k - 2, p * h)
+        return A @ A @ S(k - 2, (1 - 4 * p) * h) @ A @ A
+
+    return S(order, dt)
+
+
+def trotter_min_steps(H, t: float, eps: float, order: int, max_steps: int = 2**20) -> int:
+    """Smallest number of Trotter steps with spectral-norm error <= eps (doubling + bisection)."""
+    from numpy.linalg import matrix_power
+
+    wires = list(H.wires)
+    exact = expm(-1j * qml.matrix(H, wire_order=wires) * t)
+    err = lambda r: np.linalg.norm(matrix_power(suzuki_step(H, t / r, order, wires), r) - exact, 2)
+    hi = 1
+    while err(hi) > eps:
+        hi *= 2
+        if hi > max_steps:
+            return -1
+    lo = hi // 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if err(mid) <= eps else (mid, hi)
+    return hi
+
+
+def trotter_min_cost(H, t: float, eps: float, orders=(2, 4)) -> tuple[int, int, int]:
+    """Cheapest Trotter order for ``eps``. Returns (order, steps, cnots)."""
+    best = None
+    per_step = {o: trotter_cnot_cost(H, 1, o) for o in orders}
+    for o in orders:
+        r = trotter_min_steps(H, t, eps, o)
+        if r > 0 and (best is None or r * per_step[o] < best[2]):
+            best = (o, r, r * per_step[o])
+    return best

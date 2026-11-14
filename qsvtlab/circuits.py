@@ -32,10 +32,14 @@ def qsvt_phases_for(cheb_coeffs: np.ndarray) -> np.ndarray:
 def _signed_projector(phi, be: BlockEncoding, lcu_wire):
     r"""exp(i phi Z_lcu (2Π - 1)): +phi when lcu=|0>, -phi when lcu=|1>.
 
-    Implemented exactly as: zero-controlled phase gadget built from PCPhase pieces.
+    The operator is diagonal, so it is queued as one ``DiagonalQubitUnitary``. In gates it is
+    a pair of oppositely-controlled ``PCPhase`` ops; see ``hamiltonian_sim.qsvt_cnot_cost``.
+    Simulating it as a diagonal is about 2x faster than two dense controlled matrices.
     """
-    qml.ctrl(qml.PCPhase(phi, dim=be.dim, wires=be.wires), control=lcu_wire, control_values=0)
-    qml.ctrl(qml.PCPhase(-phi, dim=be.dim, wires=be.wires), control=lcu_wire, control_values=1)
+    n_total = 2 ** len(be.wires)
+    proj = np.where(np.arange(n_total) < be.dim, 1.0, -1.0)  # 2Π - 1 on the encoding register
+    diag = np.exp(1j * phi * np.concatenate([proj, -proj]))  # lcu wire is most significant
+    qml.DiagonalQubitUnitary(diag, wires=[lcu_wire] + be.wires)
 
 
 def real_qsvt(be: BlockEncoding, phases: np.ndarray, lcu_wire, real_part: bool = True):

@@ -218,14 +218,181 @@ def bench_hamsim(quick: bool):
     results["hamiltonian_simulation"] = out
 
 
+# --------------------------------------------------------------------------- 4. chemistry
+def bench_chemistry(quick: bool):
+    from qsvtlab.chemistry import EigenFilter, molecule_hamiltonian
+
+    CHEM_ACC = 1.6e-3
+    out = {"h2_pes": [], "h4": {}, "fidelity_vs_degree": {}}
+
+    # (a) H2 dissociation curve
+    ds = [0.5, 0.74, 1.0, 1.4, 1.8, 2.2, 2.6] if not quick else [0.74, 2.0]
+    for d in ds:
+        H, n, hf = molecule_hamiltonian(["H", "H"], [[0, 0, 0], [0, 0, d]])
+        F = EigenFilter(H, hf)
+        E0, sc, sf = F.estimate_ground_energy(coarse=(60, 0.05, 121), fine=(300, 0.01, 41))
+        g = F.prepare_ground_state(E0, ell=200)
+        idx = int("".join(map(str, hf)), 2)
+        e_hf = float(F.Hmat[idx, idx].real)
+        out["h2_pes"].append(dict(d=d, E_fci=g.energy_exact, E_hf=e_hf, E_qsvt=E0,
+                                  hf_overlap=g.hf_overlap, fidelity=g.fidelity,
+                                  success_prob=g.success_prob, circuits=F.n_circuits))
+        print(f"   H2 d={d}: |E_qsvt - E_fci| = {abs(E0 - g.energy_exact):.1e}", flush=True)
+
+    rows = out["h2_pes"]
+    d = [r["d"] for r in rows]
+    fig, ax = plt.subplots(figsize=(6.4, 4))
+    ax.plot(d, [r["E_hf"] for r in rows], "--", color=S2, label="Hartree–Fock")
+    ax.plot(d, [r["E_fci"] for r in rows], "-", color=INK, lw=1.2, label="exact (FCI)")
+    ax.plot(d, [r["E_qsvt"] for r in rows], "o", color=S1, ms=8, label="QSVT filter spectroscopy")
+    ax.set_xlabel("H–H bond length (Å)")
+    ax.set_ylabel("ground-state energy (Ha)")
+    ax.set_title("H₂ dissociation curve from QSVT eigenstate filtering")
+    ax.legend(loc="upper right")
+    fig.savefig(FIG / "chem_h2_pes.png")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6.4, 4))
+    ax.semilogy(d, [abs(r["E_hf"] - r["E_fci"]) for r in rows], "--o", color=S2, label="Hartree–Fock")
+    ax.semilogy(d, [max(abs(r["E_qsvt"] - r["E_fci"]), 1e-12) for r in rows], "-o", color=S1,
+                label="QSVT filter spectroscopy")
+    ax.axhline(CHEM_ACC, color=INK2, lw=1, ls=":")
+    ax.text(d[0], CHEM_ACC * 1.4, "chemical accuracy (1.6 mHa)", color=INK2, fontsize=9)
+    ax.set_xlabel("H–H bond length (Å)")
+    ax.set_ylabel("|E − E_FCI|  (Ha)")
+    ax.set_title("Energy error: QSVT is 4–6 orders below chemical accuracy")
+    ax.legend(loc="center right")
+    fig.savefig(FIG / "chem_h2_error.png")
+    plt.close(fig)
+
+    # (b) H4 chain: spectroscopy (coarse + fine zoom) against the exact spectrum
+    if not quick:
+        H, n, hf = molecule_hamiltonian(["H"] * 4, [[0, 0, 1.5 * i] for i in range(4)])
+        F = EigenFilter(H, hf)
+        E0, sc, sf = F.estimate_ground_energy(coarse=(60, 0.05, 121), fine=(300, 0.01, 41))
+        ev, V = np.linalg.eigh(F.Hmat)
+        g2 = np.abs(V[int("".join(map(str, hf)), 2)]) ** 2
+        g = F.prepare_ground_state(E0, ell=300)
+        out["h4"] = dict(E0_est=E0, E0_exact=float(ev[0]), hf_overlap=float(g2[0]),
+                         fidelity=g.fidelity, success_prob=g.success_prob,
+                         circuits=F.n_circuits, peaks=sc.peaks.tolist(), weights=sc.weights.tolist())
+        print(f"   H4: |E_qsvt - E_fci| = {abs(E0 - ev[0]):.1e}", flush=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8), gridspec_kw={"width_ratios": [1.6, 1]})
+        for ax, sp, title, col in [(axes[0], sc, "Full scan (degree 120)", S1),
+                                   (axes[1], sf, "Zoom on lowest peak (degree 600)", S1)]:
+            lo, hi = sp.mu.min(), sp.mu.max()
+            keep = (ev >= lo) & (ev <= hi) & (g2 > 1e-3)
+            ax.vlines(ev[keep], 0, g2[keep], color=S2, lw=2, label="exact eigenvalues, height |⟨E_k|HF⟩|²")
+            ax.plot(sp.mu, sp.p_success / 0.81, color=col, lw=1.6, label="p(μ)/s²  (simulated circuits)")
+            ax.set_title(title)
+            ax.set_xlabel("filter centre μ (Ha)")
+            ax.set_xlim(lo, hi)
+        axes[0].set_ylabel("overlap weight")
+        axes[0].legend(loc="upper right")
+        fig.suptitle("QSVT spectroscopy of a linear H₄ chain (8 qubits, 185 Pauli terms)",
+                     fontweight="bold", color=INK, y=1.02)
+        fig.savefig(FIG / "chem_h4_spectrum.png")
+        plt.close(fig)
+
+    # (c) state infidelity vs filter degree
+    fig, ax = plt.subplots(figsize=(6.4, 4))
+    cases = [("H₂ (0.74 Å)", ["H", "H"], [[0, 0, 0], [0, 0, 0.74]], S1),
+             ("H₂ (2.2 Å)", ["H", "H"], [[0, 0, 0], [0, 0, 2.2]], S2)]
+    if not quick:
+        cases.append(("H₄ chain (1.5 Å)", ["H"] * 4, [[0, 0, 1.5 * i] for i in range(4)], S3))
+    for label, sym, xyz, col in cases:
+        H, n, hf = molecule_hamiltonian(sym, xyz)
+        F = EigenFilter(H, hf)
+        ev, V = np.linalg.eigh(F.Hmat)
+        g2 = np.abs(V[int("".join(map(str, hf)), 2)]) ** 2
+        visible = ev[g2 > 1e-8]
+        gap = visible[1] - visible[0]  # gap to the next state the HF reference can see
+        delta = 0.9 * gap / F.alpha  # Lin-Tong choice: filter width ~ gap
+        ells = sorted({max(1, int(round(x / delta))) for x in np.linspace(0.5, 11, 9)})
+        inf = [max(1 - F.prepare_ground_state(ev[0], ell=l, delta=delta).fidelity, 1e-16) for l in ells]
+        out["fidelity_vs_degree"][label] = dict(delta=delta, gap=float(gap), alpha=F.alpha,
+                                                points=list(zip([2 * l for l in ells], inf)))
+        label = f"{label}: δ = {delta:.3f}, degree {2 * ells[0]}–{2 * ells[-1]}"
+        ax.semilogy([l * delta for l in ells], inf, "-o", color=col, label=label)
+    xx = np.linspace(0, 11.5, 100)
+    ax.semilogy(xx, 4 * np.exp(-2 * np.sqrt(2) * xx), color=INK2, lw=1, ls=":",
+                label="Lin–Tong bound  4·exp(−2√2 ℓδ)")
+    ax.set_ylim(1e-17, 2)
+    ax.set_xlabel("ℓ·δ   (filter half-degree × width, with δ ≈ gap/α)")
+    ax.set_ylabel("ground-state infidelity")
+    ax.set_title("Ground-state preparation: one universal exponential rate")
+    ax.legend(loc="upper right", fontsize=8.5)
+    fig.savefig(FIG / "chem_filter_fidelity.png")
+    plt.close(fig)
+    results["chemistry"] = out
+
+
+# --------------------------------------------------------------------------- 5. crossover map
+def bench_crossover(quick: bool):
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+
+    from qsvtlab.hamiltonian_sim import qsvt_min_cost, trotter_min_cost
+
+    ns = [4, 5, 6, 7, 8] if not quick else [4, 5]
+    ts = [1, 2, 4, 8, 16, 32] if not quick else [1, 8]
+    epss = [1e-3, 1e-6, 1e-9]
+    models = [("TFIM", ql.tfim), ("Heisenberg", ql.heisenberg)]
+    cmap = LinearSegmentedColormap.from_list("div", [S1, "#f0efec", S2])
+    out = {}
+    fig, axes = plt.subplots(len(models), len(epss), figsize=(12, 6.6), sharex=True, sharey=True)
+    for i, (mname, ctor) in enumerate(models):
+        for j, eps in enumerate(epss):
+            R = np.zeros((len(ns), len(ts)))
+            for a, n in enumerate(ns):
+                H = ctor(n)
+                for b, t in enumerate(ts):
+                    q = qsvt_min_cost(H, t, eps)
+                    tr = trotter_min_cost(H, t, eps)
+                    R[a, b] = q[1] / tr[2]
+                    out[f"{mname}|n={n}|t={t}|eps={eps:g}"] = dict(qsvt_degree=q[0], qsvt_cnots=q[1],
+                                                                   trotter_order=tr[0], trotter_steps=tr[1],
+                                                                   trotter_cnots=tr[2])
+            ax = axes[i, j]
+            im = ax.imshow(np.log10(R), cmap=cmap, norm=TwoSlopeNorm(0, -1.5, 1.5), origin="lower",
+                           aspect="auto")
+            for a in range(len(ns)):
+                for b in range(len(ts)):
+                    ax.text(b, a, f"{R[a, b]:.2g}", ha="center", va="center", fontsize=8, color=INK)
+            ax.set_xticks(range(len(ts)), [str(t) for t in ts])
+            ax.set_yticks(range(len(ns)), [str(n) for n in ns])
+            ax.grid(False)
+            ax.set_title(f"{mname}, ε = {eps:g}", fontsize=10)
+            if i == len(models) - 1:
+                ax.set_xlabel("evolution time t")
+            if j == 0:
+                ax.set_ylabel("qubits n")
+            print(f"   {mname} eps={eps:g} done", flush=True)
+    cb = fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02)
+    cb.set_label("CNOT ratio  QSVT / best Trotter  (log scale)")
+    cb.set_ticks([-1.5, -1, -0.5, 0, 0.5, 1, 1.5], labels=["0.03", "0.1", "0.3", "1", "3", "10", "30"])
+    fig.suptitle("Where does QSVT beat Trotter?  Blue: QSVT cheaper.  Orange: Trotter cheaper.",
+                 fontweight="bold", color=INK, x=0.45)
+    fig.savefig(FIG / "crossover_map.png")
+    plt.close(fig)
+    results["crossover"] = out
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--only", nargs="*", help="subset: phase linear hamsim chem crossover")
     args = ap.parse_args()
-    for name, fn in [("phase solver", bench_phase_solver), ("linear solver", bench_linear_solver),
-                     ("hamiltonian simulation", bench_hamsim)]:
+    jobs = [("phase", bench_phase_solver), ("linear", bench_linear_solver), ("hamsim", bench_hamsim),
+            ("chem", bench_chemistry), ("crossover", bench_crossover)]
+    out_path = ROOT / "benchmarks" / "results.json"
+    if args.only and out_path.exists():
+        results.update(json.loads(out_path.read_text()))
+    for name, fn in jobs:
+        if args.only and name not in args.only:
+            continue
         t0 = time.perf_counter()
         fn(args.quick)
         print(f"[{name}] done in {time.perf_counter() - t0:.1f}s")
-    (ROOT / "benchmarks" / "results.json").write_text(json.dumps(results, indent=1, default=float))
+    out_path.write_text(json.dumps(results, indent=1, default=float))
     print("figures ->", FIG)

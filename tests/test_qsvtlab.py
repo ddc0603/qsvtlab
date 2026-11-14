@@ -110,3 +110,61 @@ def test_trotter_converges():
     H = ql.tfim(3)
     e1, e2 = ql.trotter_error(H, 1.0, 4, 2), ql.trotter_error(H, 1.0, 8, 2)
     assert e2 < e1 / 3  # second order: ~4x per doubling
+
+
+# ---------------------------------------------------------------- chemistry
+from numpy.polynomial import chebyshev as _C  # noqa: E402
+
+from qsvtlab.chemistry import EigenFilter, filter_poly, molecule_hamiltonian  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def h2_stretched():
+    H, n, hf = molecule_hamiltonian(["H", "H"], [[0, 0, 0], [0, 0, 2.0]])
+    return EigenFilter(H, hf)
+
+
+def test_filter_poly_properties():
+    ell, delta = 60, 0.05
+    c = filter_poly(ell, delta, s=1.0)
+    x = np.linspace(-1, 1, 20001)
+    v = _C.chebval(x, c)
+    assert abs(_C.chebval(0.0, c) - 1) < 1e-12
+    assert np.abs(v).max() <= 1 + 1e-9
+    assert np.abs(v[np.abs(x) >= delta]).max() <= 2 * np.exp(-np.sqrt(2) * ell * delta)
+
+
+def test_filter_circuit_matches_closed_form(h2_stretched):
+    F = h2_stretched
+    for mu in (-1.2, -0.95, -0.4):
+        assert abs(F.success_probability(mu, 40, 0.05) - F.p_success_exact(mu, 40, 0.05)) < 1e-9
+
+
+def test_ground_energy_and_state(h2_stretched):
+    F = h2_stretched
+    E0, sc, sf = F.estimate_ground_energy(coarse=(60, 0.05, 81), fine=(200, 0.015, 21))
+    e_exact = np.linalg.eigvalsh(F.Hmat)[0]
+    assert abs(E0 - e_exact) < 1e-5  # far below chemical accuracy (1.6e-3)
+    g = F.prepare_ground_state(E0, ell=200)
+    assert g.fidelity > 1 - 1e-8
+    assert abs(sc.weights[0] - g.hf_overlap) < 0.02  # peak height = |<E0|HF>|^2
+
+
+# ---------------------------------------------------------------- crossover analysis
+def test_suzuki_matches_pennylane():
+    from qsvtlab.hamiltonian_sim import suzuki_step
+
+    H = ql.tfim(3)
+    for order in (1, 2, 4):
+        U = np.linalg.matrix_power(suzuki_step(H, -0.25, order), 4)  # PennyLane: exp(+iHt)
+        V = qml.matrix(qml.TrotterProduct(H, 1.0, n=4, order=order), wire_order=[0, 1, 2])
+        assert np.allclose(U, V, atol=1e-12)
+
+
+def test_truncation_bound_is_tight():
+    from qsvtlab.hamiltonian_sim import qsvt_truncation_error
+
+    r = ql.qsvt_time_evolution(ql.tfim(3), 1.0, eps=1e-6)
+    bound = qsvt_truncation_error(r.tau, r.deg_cos, r.deg_sin)
+    assert r.error <= bound * (1 + 1e-6)
+    assert r.error > 0.5 * bound

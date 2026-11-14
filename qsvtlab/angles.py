@@ -106,8 +106,14 @@ def solve_qsp_phases(
     n_nodes = 2 * n_red
     theta = np.pi * (np.arange(n_nodes) + 0.5) / (2 * n_nodes)
     nodes = np.cos(theta)
-    vander = np.cos(np.outer(theta, np.arange(parity, d + 1, 2)))
-    proj = np.linalg.pinv(vander)
+    ks = np.arange(parity, d + 1, 2)
+    vander = np.cos(np.outer(theta, ks))
+    # The columns are exactly orthogonal at these nodes (discrete Chebyshev orthogonality on
+    # the parity-symmetric half grid): ||col_k||^2 = N/2 (k > 0), N (k = 0). So the
+    # least-squares projector is a scaled transpose. That is O(d^2), exact, and avoids an SVD
+    # (np.linalg.pinv fails to converge for some sizes, e.g. degree 1200, on macOS Accelerate).
+    norms = np.where(ks == 0, n_nodes, n_nodes / 2)
+    proj = vander.T / norms[:, None]
 
     def residual(r):
         return proj @ qsp_response(_full_phases(r, d), nodes) - c_red
